@@ -106,8 +106,8 @@ policies = data["policies"]
 years_to_retire = max(0, retire_age - current_age)
 years_in_retire = max(0, life_expectancy - retire_age)
 
-# 計算總資產
-total_assets_wan = sum(p["value_now"] for p in policies) / 10000
+# 💡 核心修正：計算總資產 (精準判斷幣別，USD 乘以 30)
+total_assets_wan = sum(p["value_now"] * (30 if p.get("currency", "TWD") == "USD" else 1) for p in policies) / 10000
 
 st.markdown(f"### 🧑‍💼 客戶：**{client_name}** | 目前年齡：**{current_age} 歲** | 距退休：**{years_to_retire} 年**")
 
