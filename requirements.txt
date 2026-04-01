@@ -1,0 +1,11 @@
+streamlit
+supabase
+pandas
+numpy
+plotly
+yfinance
+pdfplumber
+google-genai
+gspread
+google-auth
+openpyxl
