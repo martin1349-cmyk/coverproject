@@ -19,7 +19,7 @@ st.title("📈 投資組合複合報酬率 & 風險分析")
 
 # --- 側邊欄參數設定 (全面加上 yahoostock_ 前綴隔離變數) ---
 st.sidebar.header("1. 設定投資標的")
-tickers_input = st.sidebar.text_input("輸入股票代碼 (逗號隔開)", value="1326.TW, 2317.TW, 2882.TW, 2330.TW", key="yahoostock_tickers")
+tickers_input = st.sidebar.text_input("輸入股票代碼 (逗號隔開)", value="1103.TW, 2317.TW, 2882.TW, 2330.TW", key="yahoostock_tickers")
 
 st.sidebar.header("2. 回測設定")
 years = st.sidebar.slider("回測年數", min_value=1, max_value=40, value=20, key="yahoostock_years")
