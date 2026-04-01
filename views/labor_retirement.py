@@ -1,381 +1,558 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import plotly.graph_objects as go
 import numpy as np
-import ssl
+import plotly.graph_objects as go
+import math
 import os
-import datetime
-from matplotlib.ticker import FuncFormatter
 
 # =====================================================================
-# 0. 守門員：登入狀態檢查
+# 0. 守門員：登入狀態檢查 (整合系統專用驗證機制)
 # =====================================================================
 if not st.session_state.get("authenticated", False):
     st.warning("🔒 系統偵測到未授權的存取。請回到登入頁面進行身分驗證。")
     st.stop()
 
-# =====================================================================
-# 1. 系統修正與環境配置
-# =====================================================================
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-else:
-    ssl._create_default_https_context = _create_unverified_https_context
+# ==========================================
+# 1. 頁面與全域風格設定
+# ==========================================
+# st.set_page_config(page_title="V88.8 退休推算戰情室", layout="wide", initial_sidebar_state="expanded")
 
-# PDF 列印優化 CSS
 st.markdown("""
     <style>
-    @media print {
-        .stSidebar, .stButton { display: none !important; }
-        .main { margin: 0 !important; padding: 0 !important; }
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# 強化中文字型相容性 (含 Streamlit Cloud 的文泉驛正黑體)
-plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'Arial Unicode MS', 'Microsoft JhengHei', 'PingFang HK', 'SimHei', 'sans-serif'] 
-plt.rcParams['axes.unicode_minus'] = False
-fmt = FuncFormatter(lambda x, p: f"{int(x):,}")
-
-# =====================================================================
-# 2. 核心共用載入函數
-# =====================================================================
-def load_and_clean_data(file):
-    if file is not None:
-        try:
-            df = pd.read_excel(file)
-        except Exception as e:
-            return None, f"解析上傳檔案失敗：{e}", 0, 0
-    else:
-        file_path_xls = os.path.join("data", "勞退版起始資料.xls")
-        file_path_xlsx = os.path.join("data", "勞退版起始資料.xlsx")
-        if os.path.exists(file_path_xlsx):
-            df = pd.read_excel(file_path_xlsx)
-        elif os.path.exists(file_path_xls):
-            df = pd.read_excel(file_path_xls)
-        else:
-            return None, None, 0, 0 # 備援方案在主程式處理
-
-    if df is not None:
-        # 忠實還原原 GAS 邏輯：第一列第16欄(Q)是姓名，第17欄(R)是生日
-        client_name = str(df.iloc[0, 16]) if df.shape[1] > 16 and pd.notna(df.iloc[0, 16]) else "勞退測試客戶"
-        
-        current_year = datetime.datetime.now().year
-        current_age = 40 
-        if df.shape[1] > 17 and pd.notna(df.iloc[0, 17]):
-            birthday_val = df.iloc[0, 17]
-            if isinstance(birthday_val, datetime.datetime):
-                current_age = current_year - birthday_val.year
-            elif isinstance(birthday_val, (int, float)):
-                # 如果填民國年
-                current_age = current_year - (int(birthday_val) + 1911)
-
-        names = df.iloc[:, 0].astype(str).tolist()
-        vals = [v/10000 if v > 1000000 else v for v in pd.to_numeric(df.iloc[:, 1], errors='coerce').fillna(0)]
-        total = sum(vals)
-        weights = {n: (v/total if total > 0 else 0) for n, v in zip(names, vals)}
-        return {"clientName": client_name, "currentAge": current_age, "names": names, "vals": vals}, None, total, weights
+    /* 強制深色背景與字體顏色還原 */
+    .stApp { background-color: #0a192f !important; color: #e6f1ff !important; font-family: 'Noto Sans TC', sans-serif; }
     
-    return None, None, 0, 0
+    /* 調整指標字體 */
+    [data-testid="stMetricValue"] { color: #64ffda !important; font-family: monospace !important; font-size: 28px !important; font-weight: bold;}
+    [data-testid="stMetricLabel"] { color: #8892b0 !important; font-size: 14px !important; font-weight: bold; }
+    
+    /* 調整區塊背景 */
+    .st-emotion-cache-1wivap2 { background-color: #112240; border-radius: 12px; padding: 15px; border: 1px solid #233554; }
+    
+    /* 進度條與卡片樣式 */
+    .progress-box { background: #0a192f; border-radius: 10px; padding: 10px; border: 1px solid #233554; margin: 10px 0; }
+    .progress-bar-bg { background: #233554; height: 10px; border-radius: 5px; overflow: hidden; width: 100%; }
+    .advice-card { background: rgba(10, 25, 47, 0.8); border: 1px solid #233554; border-left: 6px solid #64ffda; border-radius: 8px; padding: 15px; margin: 15px 0; }
+    
+    /* 分隔線 */
+    hr { border-color: #233554 !important; margin: 15px 0 !important; }
+    
+    /* 按鈕樣式 */
+    .btn-apply-safe > button { background-color: #06d6a0 !important; color: #0a192f !important; font-weight: bold !important; border-radius: 4px; }
+    .btn-apply-risk > button { background-color: #ffd166 !important; color: #0a192f !important; font-weight: bold !important; border-radius: 4px; }
+    </style>
+""", unsafe_allow_html=True)
 
-# 智能反推最佳提撥額公式 (忠實還原原 GAS HTML JS 邏輯)
-def calc_optimal_pmt(target_gap, years, rate):
-    if target_gap <= 0 or years <= 0 or rate <= 0: return 0
-    months = years * 12
-    monthly_rate = rate / 12
-    # 公式：c = i*p / (Math.pow(1+i, n)-1)
-    pmt = (target_gap * monthly_rate) / (((1 + monthly_rate)**months) - 1)
-    return max(0, pmt)
+# ==========================================
+# 2. 初始化 Session State
+# ==========================================
+default_states = {
+    'current_view': 'dashboard',
+    'client_name': '等待匯入...',
+    'current_age': 57,
+    'policies': [],
+    
+    # --- 共通參數 ---
+    'retire_age': 65,
+    'target_goal': 13000000,
+    'expect_pension': 50000,
+    
+    # --- 戰情室專用 ---
+    'acc_rate': 5.0,
+    'wdr_rate': 1.0,
+    'annual_income': 678132,
+    
+    # --- 模擬器專用 ---
+    'avg_ins_salary': 45800,
+    'years_li': 30,
+    'current_lp': 1000000,
+    'current_salary': 30000,
+    'has_self_contrib': True,
+    'lp_rate': 4.0,
+    'sim_mu': 1.0
+}
+for key, val in default_states.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
 
-# =====================================================================
-# 3. 側邊欄與資料初始化
-# =====================================================================
-st.title("💼 勞退推算戰情室 (V88.8 忠實還原版)")
-uploaded_file = st.sidebar.file_uploader("📁 上傳客戶 Excel (選填)", type=["xls", "xlsx"], key="labor_up_main")
+# ==========================================
+# 3. 核心回呼函式 Callbacks
+# ==========================================
+def switch_view(view_name):
+    st.session_state.current_view = view_name
 
-# 初始化資料
-raw_data, error, total_assets, weights = load_and_clean_data(uploaded_file)
+def apply_ai_suggestion(suggested_value):
+    st.session_state.expect_pension = suggested_value
 
-if error:
-    st.error(error)
+# ==========================================
+# 4. 數學邏輯運算
+# ==========================================
+def parse_excel(df):
+    if len(df) < 2: return
+    row1 = df.iloc[1].fillna('')
+    st.session_state.client_name = row1[16] if row1[16] != '' else "尊榮客戶"
+    
+    birthday_val = row1[17]
+    if isinstance(birthday_val, (int, float)) and birthday_val > 0:
+        excel_epoch = pd.Timestamp('1899-12-30')
+        actual_birthday = excel_epoch + pd.to_timedelta(birthday_val, unit='D')
+        today = pd.Timestamp.today()
+        age = today.year - actual_birthday.year
+        if today.month < actual_birthday.month or (today.month == actual_birthday.month and today.day < actual_birthday.day):
+            age -= 1
+        st.session_state.current_age = age
+
+    policies = []
+    for i in range(1, len(df)):
+        row = df.iloc[i].fillna(0)
+        if row[1] == 0 or str(row[1]).strip() == '': continue
+        policy = {
+            'policyNo': row[18], 'name': row[1], 'currency': row[2],
+            'values': [float(row[3]), float(row[4]), float(row[5]), float(row[6]), float(row[7]), float(row[8])],
+            'safetyScore': float(row[10]) if row[10] else 8,
+            'yieldScore': float(row[11]) if row[11] else 5,
+            'protectionValue': float(row[12]) if row[12] else 0,
+            'totalTerms': float(row[13]) if row[13] else 20,
+            'paidYears': float(row[14]) if row[14] else 0
+        }
+        policies.append(policy)
+    st.session_state.policies = policies
+
+def calculate_dashboard_metrics():
+    target = st.session_state.target_goal
+    a_rate = st.session_state.acc_rate / 100
+    w_rate = st.session_state.wdr_rate / 100
+    expect_pmt = st.session_state.expect_pension
+    r_age = st.session_state.retire_age
+    yR = max(0, r_age - st.session_state.current_age)
+
+    total_R, sum_S, sum_Y, total_Prot, weighted_Liq = 0, 0, 0, 0, 0
+    for p in st.session_state.policies:
+        v = p['values']
+        val_at_retire = 0
+        if yR <= 1: val_at_retire = v[0]
+        elif yR <= 10: val_at_retire = v[0] + (v[1]-v[0])*((yR-1)/9)
+        else:
+            decade = math.floor(yR/10)
+            idx1 = min(4, decade)
+            idx2 = min(5, decade+1)
+            val_at_retire = v[idx1] + (v[idx2]-v[idx1])*((yR%10)/10)
+        
+        v_retire = val_at_retire * (30 if p['currency'] == 'USD' else 1)
+        total_R += v_retire
+        sum_S += p['safetyScore']
+        sum_Y += p['yieldScore']
+        total_Prot += (p['protectionValue'] * (30 if p['currency'] == 'USD' else 1))
+        weighted_Liq += (min(1, p['paidYears'] / max(1, p['totalTerms'])) * v_retire)
+
+    m_acc_rate = a_rate / 12
+    gap = max(0, target - total_R)
+    monthly_save = 0
+    if gap > 0 and yR > 0:
+        if m_acc_rate <= 0: monthly_save = gap / (yR * 12)
+        else: monthly_save = gap / ((math.pow(1 + m_acc_rate, yR * 12) - 1) / m_acc_rate)
+
+    m_wdr_rate = w_rate / 12
+    sim_w_rate = max(0.00001, m_wdr_rate)
+    if expect_pmt <= target * sim_w_rate: lon_text = "永續領取"
+    else:
+        denom = expect_pmt - (target * sim_w_rate)
+        if denom > 0:
+            n = math.log(expect_pmt / denom) / math.log(sim_w_rate + 1)
+            lon_text = f"{math.floor(r_age + (n / 12))} 歲"
+        else:
+            lon_text = f"{r_age + 1} 歲 (立即耗盡)"
+            
+    avg_s = sum_S / max(1, len(st.session_state.policies)) if st.session_state.policies else 0
+    avg_y = sum_Y / max(1, len(st.session_state.policies)) if st.session_state.policies else 0
+    ach_sc = min(10, (total_R/target)*10) if target > 0 else 0
+    prot_sc = min(10, (total_Prot / (st.session_state.annual_income * 10)) * 10) if st.session_state.annual_income else 0
+    liq_sc = (weighted_Liq / max(1, total_R)) * 10 if total_R > 0 else 0
+    achieve_percent = min(100, (total_R / target) * 100) if target > 0 else 0
+            
+    return total_R, gap, monthly_save, lon_text, avg_s, avg_y, ach_sc, prot_sc, liq_sc, yR, achieve_percent
+
+# 🚀 升級版：Numpy 向量化運算與二元搜尋法 (將自備本金完美納入精算)
+def run_monte_carlo():
+    ageNow = st.session_state.current_age
+    ageRetire = min(st.session_state.retire_age, 70)
+    avgInsSalary = min(st.session_state.avg_ins_salary, 45800)
+    yearsLI = st.session_state.years_li
+    currentLP = st.session_state.current_lp
+    currentSalary = st.session_state.current_salary
+    hasSelf = st.session_state.has_self_contrib
+    lpRate = st.session_state.lp_rate / 100
+    capital = st.session_state.target_goal  
+    mu = st.session_state.sim_mu / 100
+    sigma = 0.07
+    inputSpend = st.session_state.expect_pension
+    
+    diff = ageRetire - 65
+    factor = max(0.8, min(1.2, 1 + (diff * 0.04)))
+    liMonth = round(avgInsSalary * yearsLI * 0.0155 * factor)
+    
+    yearsToRetire = max(0, ageRetire - ageNow)
+    contribRate = 0.12 if hasSelf else 0.06
+    lpContrib = min(currentSalary, 150000) * contribRate
+    
+    if lpRate == 0: lpFuture = currentLP + (lpContrib * 12 * yearsToRetire)
+    else: lpFuture = currentLP * math.pow(1 + lpRate, yearsToRetire) + (lpContrib * 12 * ((math.pow(1 + lpRate, yearsToRetire) - 1) / lpRate))
+        
+    termYears = 85 - ageRetire
+    lpMonth = 0
+    if termYears > 0:
+        rMonth = mu / 12
+        nMonth = termYears * 12
+        if rMonth == 0: lpMonth = lpFuture / nMonth
+        else: lpMonth = (lpFuture * rMonth) / (1 - math.pow(1 + rMonth, -nMonth))
+        
+    baseIncome = liMonth + round(lpMonth)
+    effectiveSpend = max(inputSpend, baseIncome)
+    simYears = 100 - ageRetire
+    
+    if simYears <= 0:
+        return baseIncome, {80:10, 85:10, 90:10, 95:10, 100:10}, [], baseIncome, baseIncome
+
+    # --- Numpy 矩陣運算核心 ---
+    np.random.seed(42) # 固定隨機種子，確保介面數字穩定
+    returns = mu + sigma * np.random.normal(0, 1, (simYears, 1000))
+    incomes = np.array([baseIncome if (ageRetire + y + 1) <= 85 else liMonth for y in range(simYears)])
+    
+    # 1. 計算使用者當前設定的勝率與軌跡
+    balances = np.full(1000, float(capital))
+    paths = np.zeros((simYears + 1, 1000))
+    paths[0] = balances
+    gaps = np.maximum(0, effectiveSpend - incomes) * 12
+    
+    alives = {age: np.full(1000, ageRetire >= age) for age in [80, 85, 90, 95, 100]}
+    
+    for y in range(simYears):
+        age = ageRetire + y + 1
+        balances = balances * (1 + returns[y]) - gaps[y]
+        balances = np.maximum(balances, 0)
+        paths[y+1] = balances
+        
+        for check_age in alives.keys():
+            if age == check_age:
+                alives[check_age] = (balances > 0)
+                
+    counts = {age: int(np.sum(alives[age])) for age in alives.keys()}
+    trajectories = paths[:, :50].T.tolist()
+    
+    # 2. 逆向二元搜尋引擎：精準反推自備本金(Capital)在特定勝率下的極限提領額
+    def get_win_rate(test_spend):
+        test_gaps = np.maximum(0, test_spend - incomes) * 12
+        test_b = np.full(1000, float(capital))
+        for y in range(simYears):
+            test_b = test_b * (1 + returns[y]) - test_gaps[y]
+            test_b = np.maximum(test_b, 0)
+        return np.sum(test_b > 0) / 10.0
+        
+    def find_optimal_spend(target_rate):
+        if capital <= 0: return baseIncome
+        low = float(baseIncome)
+        # 上限：基底收入 + 每年領回本金 + 最高預期報酬 (極限寬鬆範圍)
+        high = float(baseIncome + (capital / 12) + (capital * max(0, mu)))
+        best = baseIncome
+        
+        if get_win_rate(baseIncome) < target_rate: return baseIncome
+            
+        for _ in range(20): # 20次逼近運算足以精準定位到個位數
+            mid = (low + high) / 2
+            if get_win_rate(mid) >= target_rate:
+                best = mid
+                low = mid # 勝率達標，挑戰提領更多錢
+            else:
+                high = mid # 勝率不夠，減少提領額
+        return math.floor(best)
+        
+    optimalSafeCache = find_optimal_spend(80.0)
+    optimalRiskCache = find_optimal_spend(50.0)
+    
+    return baseIncome, counts, trajectories, optimalSafeCache, optimalRiskCache
+
+# ==========================================
+# 5. 資料載入函數 (精準補回 header=None)
+# ==========================================
+@st.cache_data(show_spinner=False)
+def load_data(file_buffer):
+    if file_buffer is not None:
+        try:
+            return pd.read_excel(file_buffer, header=None)
+        except Exception as e:
+            st.error(f"上傳檔案解析失敗: {e}")
+            st.stop()
+    else:
+        possible_paths = [
+            os.path.join("data", "labor_test.xlsx"),
+            os.path.join("data", "勞退版測試資料.xlsx"),
+            os.path.join("data", "勞退版起始資料.xls")
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                return pd.read_excel(path, header=None)
+        
+        st.warning("⚠️ 系統找不到預設資料檔案 (可能 GitHub 尚未同步)。請由左側手動上傳客戶 Excel 檔案。")
+        st.stop()
+
+# ==========================================
+# 6. 側邊欄：統一所有變數輸入區塊 
+# ==========================================
+with st.sidebar:
+    st.markdown("<h3 style='color:#64ffda;text-align:center;'>⚙️ 系統控制面板</h3>", unsafe_allow_html=True)
+    uploaded_file = st.file_uploader("📁 上傳客戶 Excel (選填)", type=["xls", "xlsx"])
+
+# 👉 執行資料載入並防護
+df = load_data(uploaded_file)
+if df is None:
     st.stop()
 
-if raw_data is None:
-    # 備援方案 (若無預設檔案且未上傳)
-    names = ['股票型資產', '債券型基金', '年金給付(保險)', '租金收益(房產)', '現金與存款']
-    vals = [1500, 1000, 1000, 1000, 500]
-    total_assets = sum(vals)
-    weights = {n: v/total_assets for n, v in zip(names, vals)}
-    client_name = "測試客戶"
-    current_age = 60
-else:
-    names = raw_data["names"]
-    vals = raw_data["vals"]
-    client_name = raw_data["clientName"]
-    current_age = raw_data["currentAge"]
+# 👉 解析資料並存入 session_state
+parse_excel(df)
 
-# A/B 開關
-service_mode = st.sidebar.radio("服務等級選擇", ["標準版(A)", "AI顧問版(B)"], key="labor_service_mode")
-
-# =====================================================================
-# 4. 方案 A：標準版 (忠實還原決策圖表與雷達圖)
-# =====================================================================
-if service_mode == "標準版(A)":
-    st.sidebar.header("📁 A方案：決策參數")
+with st.sidebar:
+    st.markdown("---")
     
-    col_age1, col_age2 = st.sidebar.columns(2)
-    # 這裡的 slider 變動會即時觸發下方重新運算 (實現還原互動性)
-    retire_age = col_age1.slider("退休年齡", current_age+1, 80, 65, key="labor_age_A")
-    life_expectancy = col_age2.slider("預估餘命", retire_age+1, 110, 85, key="labor_life_A")
+    if st.session_state.current_view == 'dashboard':
+        st.button("🚀 啟動 AI 退休模擬器", type="primary", use_container_width=True, on_click=switch_view, args=('simulation',))
+    else:
+        st.button("❌ 返回戰情室", type="primary", use_container_width=True, on_click=switch_view, args=('dashboard',))
+        
+    st.markdown("---")
     
-    annual_spend = st.sidebar.number_input("年度生活費目標 (萬元)", value=120, step=10, key="labor_spend_A")
-    inflation = st.sidebar.slider("預期通膨率 (%)", 0.0, 5.0, 2.0, 0.1, key="labor_inf_A") / 100
+    st.markdown("<div style='color:#64ffda;font-size:14px;font-weight:bold;margin-bottom:8px;'>🎯 核心目標設定</div>", unsafe_allow_html=True)
+    st.session_state.retire_age = st.number_input("退休年齡", value=int(st.session_state.retire_age), min_value=1, step=1)
+    st.session_state.target_goal = st.number_input("目標金額 (TWD)", value=int(st.session_state.target_goal), min_value=0, step=100000)
+    st.session_state.expect_pension = st.number_input("退休後每月提領 (TWD)", value=int(st.session_state.expect_pension), min_value=0, step=5000)
+
+    st.markdown("---")
+
+    if st.session_state.current_view == 'dashboard':
+        st.markdown("<div style='color:#64ffda;font-size:14px;font-weight:bold;margin-bottom:8px;'>📈 戰情室專用參數</div>", unsafe_allow_html=True)
+        st.session_state.acc_rate = st.number_input("累積報酬(%)", value=float(st.session_state.acc_rate), step=0.1, format="%.1f")
+        st.session_state.wdr_rate = st.number_input("提領生息(%)", value=float(st.session_state.wdr_rate), step=0.1, format="%.1f")
+        st.session_state.annual_income = st.number_input("年收入估算 (TWD)", value=int(st.session_state.annual_income), min_value=0, step=10000)
     
-    col_irr1, col_irr2 = st.sidebar.columns(2)
-    safe_irr = col_irr1.slider("保本報酬(%)", 1.0, 5.0, 2.0, 0.1, key="labor_safe_A") / 100
-    risk_irr = col_irr2.slider("積極報酬(%)", 3.0, 15.0, 6.0, 0.5, key="labor_risk_A") / 100
-    mdd_rate = st.sidebar.slider("極端市場跌幅測試 (%)", 10, 60, 30, key="labor_mdd_A")
+    elif st.session_state.current_view == 'simulation':
+        st.markdown("<div style='color:#64ffda;font-size:14px;font-weight:bold;margin-bottom:8px;'>🤖 AI 模擬器基礎參數</div>", unsafe_allow_html=True)
+        st.session_state.avg_ins_salary = st.number_input("勞保投保薪資 (Max 45,800)", value=int(st.session_state.avg_ins_salary), min_value=0, max_value=45800, step=1000)
+        st.session_state.years_li = st.number_input("勞保年資", value=int(st.session_state.years_li), min_value=0, step=1)
+        st.session_state.current_lp = st.number_input("勞退目前累積", value=int(st.session_state.current_lp), min_value=0, step=10000)
+        st.session_state.current_salary = st.number_input("勞退提撥月薪", value=int(st.session_state.current_salary), min_value=0, step=1000)
+        st.session_state.has_self_contrib = st.checkbox("勞退自提 6% ?", value=st.session_state.has_self_contrib)
+        st.session_state.lp_rate = st.number_input("勞退預期績效 (%)", value=float(st.session_state.lp_rate), step=0.1, format="%.1f")
+        st.session_state.sim_mu = st.number_input("自存金提領期報酬(μ%)", value=float(st.session_state.sim_mu), step=0.1, format="%.1f")
+        
+        if st.button("🔄 重新運算模擬", use_container_width=True):
+            st.rerun()
 
-    st.markdown(f"### 🧑‍💼 客戶：**{client_name}** | 目前年齡：**{current_age} 歲** | A方案設定")
-
-    # --- 核心計算與數據儀表板 ---
-    years_to_retire = max(1, retire_age - current_age)
-    years_in_retire = max(1, life_expectancy - retire_age)
-    ages = np.arange(current_age, life_expectancy + 1)
-
-    # 退休缺口
-    future_monthly_spend = (annual_spend / 12) * ((1 + inflation) ** years_to_retire)
-    total_needed = future_monthly_spend * 12 * years_in_retire
+# ==========================================
+# 7. 主畫面：戰情室 (Dashboard)
+# ==========================================
+if st.session_state.current_view == 'dashboard':
+    st.markdown("<h2 style='text-align:center;color:#64ffda;margin-top:0;'>📊 退休推算戰情室</h2>", unsafe_allow_html=True)
     
-    # 目前資產未來的價值 (假設按保本利率增值)
-    future_assets_val = total_assets * ((1 + safe_irr) ** years_to_retire)
-    fund_gap = max(0, total_needed - future_assets_val)
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(f"<div style='background:rgba(100,255,218,0.05);padding:8px;border-radius:20px;text-align:center;border:1px solid rgba(100,255,218,0.1);color:#8892b0;'>客戶：<span style='color:#64ffda;font-weight:bold;'>{st.session_state.client_name}</span></div>", unsafe_allow_html=True)
+    c2.markdown(f"<div style='background:rgba(100,255,218,0.05);padding:8px;border-radius:20px;text-align:center;border:1px solid rgba(100,255,218,0.1);color:#8892b0;'>現齡：<span style='color:#64ffda;font-weight:bold;'>{st.session_state.current_age} 歲</span></div>", unsafe_allow_html=True)
+    c3.markdown(f"<div style='background:rgba(100,255,218,0.05);padding:8px;border-radius:20px;text-align:center;border:1px solid rgba(100,255,218,0.1);color:#8892b0;'>退休倒數：<span style='color:#64ffda;font-weight:bold;'>{max(0, st.session_state.retire_age - st.session_state.current_age)} 年</span></div>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # 【還原關鍵功能】反推每月需存多少錢 (Optimal Cache)
-    opt_safe_pmt = calc_optimal_pmt(fund_gap, years_to_retire, safe_irr)
-    opt_risk_pmt = calc_optimal_pmt(fund_gap, years_to_retire, risk_irr)
+    total_R, gap, monthly_save, lon_text, avg_s, avg_y, ach_sc, prot_sc, liq_sc, yR, achieve_percent = calculate_dashboard_metrics()
+    
+    m_col1, m_col2 = st.columns(2)
+    with m_col1:
+        st.metric(f"{st.session_state.retire_age} 歲預計總資產", f"${round(total_R):,}")
+        st.markdown(f"<div style='color:#64ffda;font-size:13px;margin-top:-15px;'>{st.session_state.wdr_rate:.1f}% 生息：${round((st.session_state.target_goal * (st.session_state.wdr_rate/100))/12):,}/月</div>", unsafe_allow_html=True)
+    with m_col2:
+        st.markdown(f"<div style='color:#8892b0;font-size:14px;font-weight:bold;margin-bottom:5px;'>達成缺口需月存額</div><div style='color:#ef476f;font-family:monospace;font-size:28px;font-weight:bold;'>${round(monthly_save):,}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='color:#ffd166;font-size:13px;'>可支領至：{lon_text}</div>", unsafe_allow_html=True)
 
-    st.subheader("一、退休資金戰略儀表板")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("目前總資產", f"{total_assets:,.0f} 萬")
-    c2.metric("未來每月花費 (含通膨)", f"{future_monthly_spend:.1f} 萬")
-    c3.metric(f"{retire_age}歲時需備總額", f"{total_needed:,.0f} 萬")
-    c4.metric(f"目標資金缺口", f"{fund_gap:,.0f} 萬", delta_color="inverse" if fund_gap > 0 else "normal")
+    st.markdown("<hr>", unsafe_allow_html=True)
+    
+    st.markdown("<div style='font-weight:bold;font-size:16px;color:#e6f1ff;margin-bottom:10px;'>📈 資產累積趨勢</div>", unsafe_allow_html=True)
+    fig_asset = go.Figure()
+    COLORS = ['rgba(100,255,218,0.8)', 'rgba(17,138,178,0.8)', 'rgba(255,209,102,0.8)', 'rgba(239,71,111,0.8)', 'rgba(6,214,160,0.8)', 'rgba(114,9,183,0.8)']
+    x_labels = ['0年','10年','20年','30年','40年','50年','60年']
+    
+    cum_vals = [0]*7
+    for idx, p in enumerate(st.session_state.policies):
+        vals = [0] + p['values']
+        layer = []
+        for j, v in enumerate(vals):
+            val_twd = v * (30 if p['currency'] == 'USD' else 1)
+            cum_vals[j] += val_twd
+            layer.append(cum_vals[j])
+        fig_asset.add_trace(go.Scatter(x=x_labels, y=layer, mode='lines', fill='tonexty', 
+                                       name=p['name'], line=dict(width=0), fillcolor=COLORS[idx % 6]))
+    
+    fig_asset.add_trace(go.Scatter(x=x_labels, y=[st.session_state.target_goal]*7, mode='lines', 
+                                   name='退休目標', line=dict(color='#ff4d4d', width=3)))
+    
+    comp_data = []
+    r = st.session_state.acc_rate / 100
+    ann_spend = st.session_state.expect_pension * 12
+    present_val = total_R / math.pow(1+r, yR) if (1+r) > 0 else total_R
+    for t in range(0, 61, 10):
+        if t <= yR: comp_data.append(present_val * math.pow(1+r, t))
+        else:
+            post = t - yR
+            bal = total_R
+            for _ in range(post):
+                bal = bal * (1+r) - ann_spend
+                if bal < 0: bal = 0
+            comp_data.append(bal)
+            
+    fig_asset.add_trace(go.Scatter(x=x_labels, y=comp_data, mode='lines', 
+                                   name='累積預測(含提領)', line=dict(color='#ffd166', width=2)))
+    
+    fig_asset.update_layout(height=450, margin=dict(l=0,r=0,t=20,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                            legend=dict(font=dict(color='#fff', size=12)),
+                            xaxis=dict(gridcolor='#233554', tickfont=dict(color='#fff')),
+                            yaxis=dict(gridcolor='#233554', tickfont=dict(color='#fff')))
+    st.plotly_chart(fig_asset, use_container_width=True)
 
+    st.markdown("<hr>", unsafe_allow_html=True)
+    
+    st.markdown("<div style='font-weight:bold;font-size:16px;color:#e6f1ff;margin-bottom:10px;'>🎯 退休體質五維度與達成率</div>", unsafe_allow_html=True)
+    
     st.markdown(f"""
-    <div style="background-color: #f0f7ff; padding: 15px; border-radius: 8px; border-left: 5px solid #0052cc; color: #112240; margin-top: 10px;">
-        <h4 style="color: #0052cc; margin-top: 0;">💡 戰略反推：離達標每月還需要自存 (萬元)</h4>
-        🛡️ <b>保本策略 (年化 {safe_irr*100:.1f}%)</b>：每月需投入 <b>{opt_safe_pmt:,.2f} 萬</b><br>
-        🚀 <b>積極策略 (年化 {risk_irr*100:.1f}%)</b>：每月需投入 <b>{opt_risk_pmt:,.2f} 萬</b>
+    <div class="progress-box">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px; color:#8892b0;">
+            <span>既有達成率</span><span style="color:#64ffda;font-weight:bold;">{round(achieve_percent)}%</span>
+        </div>
+        <div class="progress-bar-bg">
+            <div style="width:{achieve_percent}%; background:#118ab2; height:100%; border-radius:5px;"></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    radar_col, score_col = st.columns([2, 1])
+    with radar_col:
+        fig_radar = go.Figure(data=go.Scatterpolar(
+            r=[avg_s, avg_y, ach_sc, prot_sc, liq_sc],
+            theta=['安全性','獲利性','達成率','保障度','流動性'],
+            fill='toself',
+            fillcolor='rgba(100,255,218,0.3)',
+            line=dict(color='#64ffda', width=2)
+        ))
+        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 10]), bgcolor='rgba(0,0,0,0)'),
+                                showlegend=False, height=350, margin=dict(l=40,r=40,t=20,b=20), paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_radar, use_container_width=True)
+        
+    with score_col:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <table style="width:100%; border-collapse:collapse; font-size:14px; color:#8892b0;">
+            <tr style="border-bottom:1px solid #233554;"><td style="padding:10px 5px;">🛡️ 安全性得分</td><td style="text-align:right; color:#64ffda; font-family:monospace; font-weight:bold;">{round(avg_s, 1)} / 10</td></tr>
+            <tr style="border-bottom:1px solid #233554;"><td style="padding:10px 5px;">📈 獲利性得分</td><td style="text-align:right; color:#64ffda; font-family:monospace; font-weight:bold;">{round(avg_y, 1)} / 10</td></tr>
+            <tr style="border-bottom:1px solid #233554;"><td style="padding:10px 5px;">☂️ 家庭保障度</td><td style="text-align:right; color:#64ffda; font-family:monospace; font-weight:bold;">{round(prot_sc, 1)} / 10</td></tr>
+            <tr><td style="padding:10px 5px;">💧 變現流動性</td><td style="text-align:right; color:#64ffda; font-family:monospace; font-weight:bold;">{round(liq_sc, 1)} / 10</td></tr>
+        </table>
+        """, unsafe_allow_html=True)
+        
+    st.markdown(f"""
+    <div class="advice-card">
+        <h4 style="color:#64ffda; margin-top:0;">💡 CFP 專業精算結論</h4>
+        <p style="font-size:14px; color:#e6f1ff; margin-bottom:0; line-height:1.6;">
+            目標本金 <b style="color:#ffd166;">${st.session_state.target_goal:,}</b> 下每月領 <b style="color:#ffd166;">${st.session_state.expect_pension:,}</b> 可支領至 <b style="color:#ffd166;">{lon_text}</b>。<br>
+            目前缺口 <b style="color:#ef476f;">${round(gap):,}</b>，建議每月儲存 <b style="color:#ef476f;">${round(monthly_save):,}</b>。
+        </p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.divider()
-
-    # --- 資產配置與雷達圖區塊 ---
-    # 【忠實還原】雷達圖與決策圖表
-    col_chart, col_radar = st.columns([1.5, 1])
-
-    with col_chart:
-        st.subheader("② 資產增長曲線圖 (標準 vs. A方案優化)")
-        # 簡單推算直線路徑做為對比
-        paths = np.zeros((years_to_retire + 1, 2))
-        paths[0] = [total_assets, total_assets]
-        for y in range(1, years_to_retire + 1):
-            paths[y, 0] = paths[y-1, 0] * (1 + safe_irr) # 標準(只靠現有資產)
-            # A方案：現有資產增值 + 每月積極自存金累積
-            monthly_risk_fund = opt_risk_pmt * 12
-            paths[y, 1] = (paths[y-1, 1] * (1 + risk_irr)) + (monthly_risk_fund * ((1+risk_irr)**y - 1)/risk_irr)
+    if st.session_state.policies:
+        st.markdown("<br><div style='font-weight:bold;font-size:16px;color:#64ffda;margin-bottom:10px;'>保單清單</div>", unsafe_allow_html=True)
+        
+        yR = max(0, st.session_state.retire_age - st.session_state.current_age)
+        
+        html_table = "<table style='width:100%; border-collapse:collapse; font-size:14px; color:#e6f1ff;'>"
+        html_table += "<tr style='border-bottom:1px solid #233554; color:#8892b0; text-align:left;'>"
+        html_table += "<th style='padding:10px 5px;'>保單號碼</th>"
+        html_table += "<th style='padding:10px 5px;'>保單名稱</th>"
+        html_table += f"<th style='padding:10px 5px; text-align:right;'>{st.session_state.retire_age}歲價值</th>"
+        html_table += "</tr>"
+        
+        for p in st.session_state.policies:
+            v = p['values']
+            if yR <= 1: val_at_retire = v[0]
+            elif yR <= 10: val_at_retire = v[0] + (v[1]-v[0])*((yR-1)/9)
+            else:
+                decade = math.floor(yR/10)
+                idx1 = min(4, decade)
+                idx2 = min(5, decade+1)
+                val_at_retire = v[idx1] + (v[idx2]-v[idx1])*((yR%10)/10)
             
-        fig_growth = go.Figure()
-        sim_ages = np.arange(current_age, retire_age + 1)
-        fig_growth.add_trace(go.Scatter(x=sim_ages, y=paths[:, 0], name="標準 (僅現有資產)", line=dict(color='gray', dash='dash')))
-        fig_growth.add_trace(go.Scatter(x=sim_ages, y=paths[:, 1], name="A方案 (現有+積極自存)", line=dict(color='#0052cc', width=4)))
-        fig_growth.add_hline(y=total_needed, line_dash="dash", line_color="#ff4b4b", annotation_text="🎯 總目標")
-        fig_growth.update_layout(xaxis_title="年齡", yaxis_title="資產價值 (萬元)", hovermode="x unified", legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01))
-        st.plotly_chart(fig_growth, use_container_width=True)
-
-    with col_radar:
-        st.subheader("雷達圖：決策因子對比")
-        # 忠實還原原 GAS HTML 雷達圖邏輯 (對比花費與最佳提撥)
-        pro_vals = {"傳承與身故": 80, "意外": 60, "住院": 70, "手術": 50, "實支實付": 90, "重疾": 75}
-        radar_cats = list(pro_vals.keys())
-        # 標準版數據 (隨機演示用，對齊原 HTML 視覺)
-        s_data = [80, 60, 70, 50, 90, 75] 
-        # 優化版數據 (假設優化後各項分數調升)
-        o_data = [90, 85, 80, 75, 95, 85]
-        
-        fig_radar = go.Figure()
-        fig_radar.add_trace(go.Scatterpolar(r=s_data, theta=radar_cats, fill='toself', name='標準版(A)'))
-        fig_radar.add_trace(go.Scatterpolar(r=o_data, theta=radar_cats, fill='toself', name='優化支出(A方案)', line=dict(color='#00CC96')))
-        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, margin=dict(l=40, r=40, t=20, b=20))
-        st.plotly_chart(fig_radar, use_container_width=True)
-
-# =====================================================================
-# 5. 方案 B：AI顧問版 (【重點修復】還原勞保勞退數據整合與蒙地卡羅)
-# =====================================================================
-else:
-    st.sidebar.header("💎 B方案：VIP 戰略參數")
-    
-    # --- 【還原核心功能】補上勞保勞退數據輸入 ---
-    st.sidebar.subheader("💰 預期收入補貼 (年額)")
-    # 此處輸入框將即時整合進蒙地卡羅模擬
-    v_life_inc = st.sidebar.number_input("1. 勞保年金 (月額/萬)", value=2.5, step=0.1, key="labor_ins_B")
-    v_ret_inc_lump = st.sidebar.number_input("2. 勞退專戶總額 (一次金/萬)", value=500, step=50, key="labor_ret_B")
-    
-    annual_spend_B = st.sidebar.number_input("年度生活費目標 (萬元)", value=120, step=10, key="labor_spend_B")
-    inflation_B = st.sidebar.slider("預期通膨率 (%)", 0.0, 5.0, 2.0, 0.1, key="labor_inf_B") / 100
-    risk_irr_B = st.sidebar.slider("AI 預期報酬率 (%)", 3.0, 15.0, 6.0, 0.5, key="labor_risk_B") / 100
-    v_vol = st.sidebar.slider("市場波動度 (%)", 1.0, 25.0, 10.0, key="labor_vol_B") / 100
-    v_legacy = st.sidebar.number_input("預留傳承目標 (萬元)", value=1000, key="labor_leg_B")
-
-    # 退休年齡固定為 65 (對齊原文本)，規劃觀察至 85
-    retire_age_B = 65
-    obs_years = 35 # 從目前60規劃到95
-    v_ages = np.arange(current_age, current_age + obs_years + 1)
-    
-    st.markdown(f"### 🧑‍💼 客戶：**{client_name}** | 目前年齡：**{current_age} 歲** | B方案：AI顧問與全景導航")
-
-    # --- 整合勞保勞退的蒙地卡羅模擬引擎 (忠實還原文本B方案邏輯) ---
-    def calc_vip_pro_with_labor(total, spend, l_ins_monthly, r_inc_lump, legacy, rate, vol, start_age):
-        sims = 1000
-        days = obs_years * 12 
-        dt = 1/12
-        np.random.seed(42)
-        
-        # 產生市場隨機波動矩陣
-        Z = np.random.normal(0, 1, (days, sims))
-        monthly_drift = (rate - 0.5 * vol**2) * dt
-        monthly_shock = vol * np.sqrt(dt) * Z
-        monthly_returns_sim = np.exp(monthly_drift + monthly_shock)
-        
-        paths = np.zeros((days + 1, sims))
-        paths[0] = total
-        
-        # 月勞保年金 (萬)
-        l_ins_annual = l_ins_monthly
-        
-        # 依序模擬每一月
-        for m in range(1, days + 1):
-            curr_age = start_age + (m/12)
+            v_retire = val_at_retire * (30 if p['currency'] == 'USD' else 1)
             
-            # --- 【還原核心邏輯】併入勞保勞退收入 ---
-            monthly_income = 0
-            if curr_age >= 65:
-                monthly_income += l_ins_annual # 啟動勞保年金
-                
-            if curr_age == 65:
-                # 65歲一次匯入勞退專戶金 (一次金)
-                paths[m-1] += r_inc_lump
-                
-            monthly_spend = spend / 12
+            p_no = str(p.get('policyNo', ''))
+            if p_no.endswith('.0'): p_no = p_no[:-2]
+            if p_no == '0': p_no = ''
             
-            # 餘額 = (本金 + 收入 - 支出) * 報酬
-            # 註：這裡假設支出在月初發生，收入在月初匯入
-            net_base = paths[m-1] + monthly_income - monthly_spend
+            html_table += f"<tr style='border-bottom:1px solid #233554;'><td style='padding:10px 5px;'>{p_no}</td><td style='padding:10px 5px;'>{p['name']}</td><td style='padding:10px 5px; text-align:right; color:#64ffda; font-weight:bold; font-family:monospace;'>${v_retire:,.0f}</td></tr>"
             
-            # 護欄機制：低於傳承目標時強制凍結支出 (原文本 B 方案邏輯)
-            if net_base < legacy:
-                net_base = paths[m-1] + monthly_income - (monthly_spend * 0.5) # 支出打對折
-                
-            paths[m] = net_base * monthly_returns_sim[m-1]
-            paths[m] = np.maximum(paths[m], 0) # 資產歸零停止
-            
-        return paths
-
-    with st.spinner("🧠 正在整合勞保勞退數據進行 1,000 次蒙地卡羅模擬..."):
-        mc_matrix = calc_vip_pro_with_labor(total_assets, annual_spend_B, v_life_inc, v_ret_inc_lump, v_legacy, risk_irr_B, v_vol, current_age)
-        
-        final_values = mc_matrix[-1]
-        percentile_med = np.median(mc_matrix, axis=1) # 50% 中位數路徑
-        
-        # 計算退休成功率 (期末資產 > 0)
-        success_rate = np.mean(final_values > 0) * 100
-        
-    st.subheader(f"④ 退休提領與傳承導航 (實測成功率: {success_rate:.1f}%)")
-    
-    c_b1, c_b2, c_b3 = st.columns(3)
-    c_b1.metric("期末資產中位數 (95歲)", f"{int(percentile_med[-1]):,} 萬")
-    c_b2.metric("勞保月領 (65歲起)", f"{v_life_inc} 萬")
-    c_b3.metric("勞退一次金 (65歲)", f"{v_ret_inc_lump} 萬")
-
-    # --- 繪圖區塊 ---
-    col_v1, col_v2 = st.columns([1, 1.2])
-
-    with col_v1:
-        st.subheader("資產配置建議：標準 vs AI")
-        suggested_weights = [w*0.8 if '股' in n else (w*1.2 if '債' in n or '年' in n else w) for n, w in zip(names, weights.values())]
-        s_sum = sum(suggested_weights); suggested_weights = [sw/s_sum for sw in suggested_weights]
-        
-        fig_s, ax_s = plt.subplots(); 
-        ax_s.pie(suggested_weights, labels=names, autopct='%1.1f%%'); 
-        st.pyplot(fig_s)
-        st.success("💡 **AI顧問配置建議**：建議稍微調升穩定收益資產比重，以守護傳承底線。")
-
-    with col_v2:
-        st.subheader("全景導航模擬圖 (整合勞保勞退)")
-        fig_mc = go.Figure()
-        
-        # 畫 50 條隨機軌跡做為視覺參考
-        sim_ages_mc = np.linspace(current_age, current_age + obs_years, mc_matrix.shape[0])
-        random_indices = np.random.choice(1000, 50, replace=False)
-        for i in random_indices:
-            fig_mc.add_trace(go.Scatter(x=sim_ages_mc, y=mc_matrix[:, i], mode='lines', line=dict(color='rgba(142, 68, 173, 0.05)', width=1), showlegend=False, hoverinfo='skip'))
-            
-        # 畫中位數與傳承線
-        fig_mc.add_trace(go.Scatter(x=sim_ages_mc, y=percentile_med, name='中位數資產餘額', line=dict(color='#8e44ad', width=4)))
-        fig_mc.add_hline(y=v_legacy, line_dash="dash", line_color="#e74c3c", annotation_text=f"傳承目標: {v_legacy}萬")
-        fig_mc.add_vline(x=65, line_dash="dot", line_color="gray", annotation_text="65歲(勞保勞退啟動)")
-        
-        fig_mc.update_layout(xaxis_title="年齡", yaxis_title="資產價值 (萬元)", hovermode="x unified", legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01))
-        st.plotly_chart(fig_mc, use_container_width=True)
-
-    st.divider()
-
-    # --- AI 健檢區塊 ---
-    st.subheader("🔮 ⑥ AI 戰略分析 (併入勞保勞退數據)")
-    if not MY_GEMINI_KEY:
-        st.warning("請先設定 GEMINI_API_KEY。")
-    else:
-        if st.button("🚀 啟動 AI 深度戰略分析", use_container_width=True, type="primary"):
-            with st.spinner("AI 正在根據勞保數據與模擬結果生成戰略報告..."):
-                try:
-                    from google import genai
-                    client = genai.Client(api_key=MY_GEMINI_KEY)
-                    
-                    prompt = f"""
-                    你是一位頂級的 CFP 國際理財規劃顧問。
-                    客戶 {client_name} 目前 {current_age} 歲。
-                    設定在 65 歲將一次性匯入勞退專戶總額 {v_ret_inc_lump} 萬，並開始月領勞保年金 {v_life_inc} 萬。
-                    在積極型投資({risk_irr_B*100}%)，設定 2027年為期末傳承目標 {v_legacy} 萬。
-                    
-                    蒙地卡羅實測結果：95 歲資產成功率為 {success_rate:.1f}%。
-                    
-                    請以「專業、戰略性」的語氣，直接給出 3 點針對「如何在 65 歲前優化資產配置、確保傳承目標」的具體建議。
-                    (請使用 Markdown 格式)
-                    """
-                    response = client.models.generate_content(model='gemini-2.5-flash', contents=[prompt])
-                    
-                    st.success("✅ AI 戰略分析完成！")
-                    st.markdown(f'<div style="background-color: #f0f7ff; border-left: 5px solid #0052cc; padding: 20px; border-radius: 8px;">{response.text}</div>', unsafe_allow_html=True)
-                except Exception as e:
-                    st.error(f"AI 連線失敗：{e}")
+        html_table += "</table><br>"
+        st.markdown(html_table, unsafe_allow_html=True)
 
 # ==========================================
-# 頁尾免責聲明
+# 8. 主畫面：AI 模擬器 (Simulation)
 # ==========================================
-st.divider()
-footer_html = """
-<div style="text-align: center; color: #7f8c8d; font-size: 12px; line-height: 1.5; padding: 15px 0;">
-    <strong>版權所有 © 林馬丁 (Martin Lin)。本報表圖表文字由 AI 自動解析生成，僅供 CFP 內部參考，理賠依各保險公司憑證為準。</strong><br>
-    <br>
-    <b>【系統免責聲明】</b><br>
-    1. <b>僅供參考，非投資建議：</b> 本系統所有模擬數據均基於歷史假設與特定演算法，絕不構成任何具體之投資、投保或稅務建議。<br>
-    2. <b>不保證未來績效：</b> 通膨率、醫療通膨、報酬率與波動度皆可能隨市場巨幅變動，歷史數據不代表未來實際表現。<br>
-    3. <b>風險自負原則：</b> 顧問或使用者應獨立判斷並自行承擔所有決策之最終風險。本系統概不承擔任何法律與連帶賠償責任。
-</div>
-"""
-st.markdown(footer_html, unsafe_allow_html=True)
+elif st.session_state.current_view == 'simulation':
+    st.markdown("<h2 style='text-align:center;color:#64ffda;margin-top:0;'>🤖 退休現金流壓力測試 V88.00</h2>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;color:#8892b0;font-size:13px;margin-bottom:20px;'>三層式資金堆疊 | AI 最佳解建議 (20/80 Rule)</div>", unsafe_allow_html=True)
+    
+    baseIncome, counts, trajectories, optSafe, optRisk = run_monte_carlo()
+    
+    fig_mc = go.Figure()
+    start_age = min(st.session_state.retire_age, 70)
+    x_axis = list(range(start_age, 101))
+    for i in range(min(50, len(trajectories))):
+        fig_mc.add_trace(go.Scatter(x=x_axis, y=trajectories[i], mode='lines', 
+                                    line=dict(width=1, color='rgba(100, 255, 218, 0.2)'), showlegend=False))
+    fig_mc.update_layout(title=dict(text="自存金資產模擬走勢 (1000次迴圈)", font=dict(color='#8892b0', size=16)),
+                         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='#0a192f', font=dict(color='#8892b0'), 
+                         height=450, margin=dict(l=0, r=0, t=40, b=0),
+                         xaxis=dict(gridcolor='#233554'), yaxis=dict(gridcolor='#233554'))
+    st.plotly_chart(fig_mc, use_container_width=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    c_stat1, c_stat2 = st.columns([1.5, 3])
+    
+    with c_stat1:
+        st.markdown(f"""
+        <div style="background:#172a45; padding:15px; border-radius:8px; border:1px solid #233554; text-align:center; height:100%;">
+            <div style="font-size:14px; color:#8892b0;">勞保+勞退 (85歲前)</div>
+            <div style="font-size:32px; font-weight:bold; color:#ffd166; margin:10px 0;">${baseIncome:,}</div>
+            <div style="font-size:13px; color:#8892b0;">每月固定領</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with c_stat2:
+        st.markdown("""<div style="font-size:14px; color:#8892b0; margin-bottom:8px;">資產存續里程碑 (蒙地卡羅成功率)</div>""", unsafe_allow_html=True)
+        rate_cols = st.columns(5)
+        colors = ['#06d6a0', '#06d6a0', '#ffd166', '#ffd166', '#ef476f']
+        ages = [80, 85, 90, 95, 100]
+        for idx, age in enumerate(ages):
+            rate = (counts[age] / 10)
+            html = f"""
+            <div style="background:rgba(255,255,255,0.05); border:1px solid {colors[idx]}; border-radius:6px; padding:15px 4px; text-align:center;">
+                <div style="font-size:14px; color:{colors[idx]}; margin-bottom:4px;">{age} 歲</div>
+                <div style="font-size:20px; font-weight:bold; color:{colors[idx]};">{rate:.1f}%</div>
+            </div>
+            """
+            rate_cols[idx].markdown(html, unsafe_allow_html=True)
+            
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("<div style='background:rgba(100,255,218,0.05); border:1px solid #64ffda; border-radius:8px; padding:20px;'>", unsafe_allow_html=True)
+    st.markdown("<div style='font-weight:bold; color:#64ffda; font-size:16px; margin-bottom:15px;'>🤖 AI 現金流最佳解建議 (依據 80/20 Rule)</div>", unsafe_allow_html=True)
+    
+    ai_c1, ai_c2 = st.columns(2)
+    with ai_c1:
+        st.markdown(f"<span style='color:#06d6a0; font-size:16px;'>● 穩健提領 (80%勝率):</span> <span style='font-weight:bold; color:#fff; font-size:22px;'>${optSafe:,}</span> / 月", unsafe_allow_html=True)
+        st.button("✅ 一鍵套用穩健建議", on_click=apply_ai_suggestion, args=(optSafe,), type="primary", use_container_width=True)
+        
+    with ai_c2:
+        st.markdown(f"<span style='color:#ffd166; font-size:16px;'>● 積極提領 (50%勝率):</span> <span style='font-weight:bold; color:#fff; font-size:22px;'>${optRisk:,}</span> / 月", unsafe_allow_html=True)
+        st.button("⚡ 一鍵套用積極建議", on_click=apply_ai_suggestion, args=(optRisk,), type="primary", use_container_width=True)
+        
+    st.markdown("</div>", unsafe_allow_html=True)
