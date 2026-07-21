@@ -26,7 +26,7 @@ engine = get_engine()
 # ==========================================
 # 2. 介面主體
 # ==========================================
-st.title("📊 餘命預估系統V1")
+st.title("📊 餘命預估系統V1 https://cdrc.hpa.gov.tw/index.jsp ")
 st.markdown("---")
 
 if engine is None:
