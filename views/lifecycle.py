@@ -263,4 +263,4 @@ with col2:
                 </div>
                 ''', unsafe_allow_html=True)
                 
-                st.info("💡 以上建議為 AI 系統依據精算模型產出之初稿，請與您的 CFP 國際認證高級理財規劃顧問進行深度討論，以量身訂做最適合您的專屬財務計畫。")
+                st.info("💡 以上建議數據 https://cdrc.hpa.gov.tw/index.jsp 產出之初稿，以量身訂做最適合您的專屬財務計畫。")
