@@ -75,7 +75,7 @@ with col1:
         st.markdown("📝 **若客戶有直系血親癌症病史，系統將動態重算其危險勝算比 (Hazard Ratio) 與預期餘命。**")
         father_cancers = st.multiselect(
             "父親曾罹患之癌症", 
-            ["無", "肺癌", "肝癌", "大腸直腸癌", "胃癌", "胰臟癌", "攝護腺癌"],
+            ["無", "肺癌", "肝癌", "大腸直腸癌", "胃癌", "血癌", "胰臟癌", "攝護腺癌"],
             default=["無"], key="lifecycle_father_cancers"
         )
         mother_cancers = st.multiselect(
@@ -97,7 +97,7 @@ with col1:
 
     st.markdown("---")
     # 修正 width="stretch" 為 use_container_width=True
-    calculate_btn = st.button("🚀 開始精算並回寫 Excel", use_container_width=True, type="primary", key="lifecycle_calc_btn")
+    calculate_btn = st.button("🚀 開始精算", use_container_width=True, type="primary", key="lifecycle_calc_btn")
 
 with col2:
     st.header("📈 精算結果與回寫狀態")
@@ -130,7 +130,7 @@ with col2:
                 
                 is_saved = engine.export_to_master_excel(client_info, health_factors, curve_B)
                 if is_saved:
-                    st.success(f"✅ 已完成精算！客戶 {client_name} 的資料已更新至資料庫。")
+                    st.success(f"✅ 已完成精算！客戶 {client_name} 的資料已更新。")
                 
                 # ==========================================
                 # 區塊一：存活率分析
@@ -263,4 +263,5 @@ with col2:
                 </div>
                 ''', unsafe_allow_html=True)
                 
-                st.info("💡 以上建議為 AI 系統依據精算模型產出之初稿，請與您的 CFP 國際認證高級理財規劃顧問進行深度討論，以量身訂做最適合您的專屬財務計畫。")
+                st.info("💡 以上建議為 AI 系統依據精算模型產出之初稿，請與您的 CFP 國際認證高級理財規劃顧問進行深度討論，以量身訂做最適合您的專屬財務計畫。
+                        慢性病評估風險平台：https://cdrc.hpa.gov.tw/index.jsp ")
