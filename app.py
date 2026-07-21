@@ -36,9 +36,9 @@ else:
         "財務試算系統": [
             st.Page("views/age65.py", title="退休生活花費預估", icon="📊", default=True),
             st.Page("views/whichone70.py", title="差一歲退休差異多大", icon="📈"),
-            #st.Page("views/yahoostock.py", title="投資組合試算", icon="📉"),
             st.Page("views/retirement_prep.py", title="退休金準備", icon="🎯"),
             st.Page("views/labor_retirement.py", title="勞退推算版", icon="💼"),
+            st.Page("views/lifecycle.py", title="健康指數與餘命推算", icon="📉"),
         ],
         "帳戶管理": [
             st.Page(logout, title="登出系統", icon="🚪"),
