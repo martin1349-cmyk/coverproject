@@ -263,4 +263,4 @@ with col2:
                 </div>
                 ''', unsafe_allow_html=True)
                 
-                st.info("💡 以上建議數據 https://cdrc.hpa.gov.tw/index.jsp 產出之初稿，以量身訂做最適合您的專屬財務計畫。")
+                st.info("💡 系統計算僅供財務規劃參考，不構成投資建議或醫療診斷。")
